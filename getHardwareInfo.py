@@ -1,55 +1,171 @@
-# This script only works on WINDOWS with NVIDIA GPUs.
+from csv import DictReader
 from math import ceil, floor
+from os import curdir
+from platform import system # detect which OS is running
+from plistlib import loads # parse darwin plist
+from pprint import pprint
 from subprocess import check_output
 
+# #### MacOS #### #
 
 # ---- CPU ----
-def getCPU():
+def darwin_getCPU():
     try:
-        return check_output(["wmic","cpu","get", "name"]).decode().strip().split("\n")[1]
+        # get cores amount: system_profiler SPHardwareDataType
+        outputPlist = loads(check_output(["system_profiler","SPHardwareDataType","-xml"]))[0]
+        cpuCores = str(outputPlist["_items"][0]["number_processors"])
+
+        # sysctl -n machdep.cpu.brand_string
+        return check_output(["sysctl","-n","machdep.cpu.brand_string"]).decode().rstrip("\n") + ", Cores: " + cpuCores
     except Exception as e:
         return str(e)
 
 
 # ---- GPU ----
-# only works for NVIDIA GPU
-def getGPU():
+def darwin_getGPU():
     try:
-        line_as_bytes = check_output("nvidia-smi -L", shell=True)
-        line = line_as_bytes.decode("ascii")
-        _, line = line.split(":", 1)
-        line, _ = line.split("(")
-        gpuModelName = line.strip()
-        gpuMemory = getGPUMemory()
-        
-        return gpuModelName + " (" + gpuMemory + ")"
+        # system_profiler SPDisplaysDataType -xml
+        outputPlist = loads(check_output(["system_profiler","SPDisplaysDataType","-xml"]))[0] # access index 0 to get dict
+        gpuModel = outputPlist["_items"][0]["_name"]
+        gpuVRAM = outputPlist["_items"][0]["spdisplays_vram"]
+        return gpuModel + ", VRAM: " + gpuVRAM
+
     except Exception as e:
         return str(e)
 
-# only works for NVIDIA GPU
-def getGPUMemory():
+
+# ---- Mainboard ----
+def darwin_getMainboard():
     try:
-        command = "nvidia-smi --query-gpu=memory.free --format=csv"
-        memory_free_info = check_output(command.split()).decode('ascii').split('\n')[:-1][1:]
-        memory_free_values = [int(x.split()[0]) for i, x in enumerate(memory_free_info)]
+        return ""
+
+    except Exception as e:
+        return str(e)
+
+
+# ---- Mainboard ----
+def darwin_getRAM():
+    try:
+        # system_profiler SPMemoryDataType -xml
+        outputPlist = loads(check_output(["system_profiler","SPMemoryDataType","-xml"]))[0] # access index 0 to get dict
+        ramModulesList = outputPlist["_items"][0]["_items"]#["_name"]
+
+        totalRAM = 0
+
+        finalString = ""
+        for index,ramStick in enumerate(ramModulesList):
+            if index != len(ramModulesList) - 1:
+                finalString += "\t" + ramStick["dimm_part_number"] + ", Size: " + ramStick["dimm_size"] + ", Type:" + ramStick["dimm_type"] + ", Slot:" + ramStick["_name"] + "\n"
+            else:
+                finalString += "\t" + ramStick["dimm_part_number"] + ", Size: " + ramStick["dimm_size"] + ", Type:" + ramStick["dimm_type"] + ", Slot:" + ramStick["_name"]
+            # get size of current RAM stick as int
+            currentRAMModuleCapacity = ""
+            for c in ramStick["dimm_size"]:
+                if c.isdigit():
+                    currentRAMModuleCapacity += c
+            totalRAM += int(currentRAMModuleCapacity)
+
+        finalString = "\t" + str(totalRAM) + " GB Combined\n" + finalString
+
+        return finalString
+
+    except Exception as e:
+        return str(e)
+
+
+# ---- Disks ----
+def darwin_getDisks():
+    try:
+        # get list of disks
+        diskList = loads(check_output(["diskutil","list","-plist"]))["WholeDisks"]
+
+        # list of lists, each element is a physical disks that contains further information [location, model, size]
+        finalDiskInfos = []
+
+        totalStorage = 0
+
+        # get more info from each disk
+        for d in diskList:
+            # diskutil info -plist disk0
+            diskInfo = loads(check_output(["diskutil","info","-plist", d]))
+
+            # only show actual real-world disks
+            if diskInfo["VirtualOrPhysical"] != "Physical":
+                continue
+
+            diskLocation = diskInfo["DeviceNode"]
+            diskName = diskInfo["MediaName"]
+            diskSize = str(floor(float(diskInfo["TotalSize"]) / 1024**3))
+            totalStorage += int(diskSize)
+
+            finalDiskInfos.append([diskLocation, diskName, diskSize])
+
+
+        # build final string
+        finalString = "\t" + str(totalStorage) + " GB Combined\n"
+        for fDisk in finalDiskInfos:
+            finalString += "\t" + fDisk[1] + ",\tSize: " + fDisk[2] + " GB, Location: " + fDisk[0] + "\n"
+        return finalString
+
+    except Exception as e:
+        return str(e)
+
+
+# #### WINDOWS #### #
+
+# ---- CPU ----
+def windows_getCPU():
+    try:
+       cpuModel = check_output(["wmic","cpu","get", "name"]).decode().strip().split("\n")[1]
+       cpuCoresAmount = check_output(["wmic","cpu","get", "NumberOfCores"]).decode().strip().split("\n")[1]
+       return cpuModel + ", Cores: " + cpuCoresAmount
+    except Exception as e:
+        return str(e)
+
+
+# ---- GPU ----
+def windows_getGPU():
+    # wmic path win32_VideoController get /FORMAT:CSV # CSV > LIST for parsing
+    try:
+        gpuInfo = check_output(["wmic","path","win32_VideoController", "get", "/FORMAT:CSV"]).decode().strip().split("\n")
+
+        gpuList = []
+        csv = DictReader(gpuInfo)
+        for row in csv:
+            gpuList.append(dict(row))
+
+        # list of gpus model names (reported memory by "AdapterRAM" is wrong [reports 4gb instead of 12gb for me], so i will use powershell method instead )
+        gpuListRelevant = []
+
+        # iterate over gpuList and extract gpu model names
+        for gpu in gpuList:
+            # Caption might as well be PNPDeviceID
+            gpuListRelevant.append(str(gpu["Caption"]))
         
-        # dirty way to get correct memory amount in GB
-        approxMemory = ceil(memory_free_values[0] * 1.1)
-        memInGb = 0
-        while True:
-            approxMemory -= 1000
-            memInGb += 1
-            if approxMemory < 1000:
-                break
-        memInGb = str(memInGb)
-        
-        return memInGb + " GB Memory"
+        # get actually accurate GPU VRAM size using powershell
+        accurateVRAMStr = ""
+        try:
+            command = '(Get-ItemProperty -Path "HKLM:\\SYSTEM\\ControlSet001\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}\\0*" -Name HardwareInformation.qwMemorySize -ErrorAction SilentlyContinue)."HardwareInformation.qwMemorySize"'
+            accurateVRAM = check_output(["powershell", "-Command", command], text=True)
+            accurateVRAMStr = str(ceil(float(accurateVRAM) / 1024**3))
+        except Exception as e:
+            pass
+
+        # build final string
+        finalString = ""
+        for index, curGPU in enumerate(gpuListRelevant):
+            if index == 0 and accurateVRAMStr != "" : # first GPU will be dedicated gpu if it exists
+                finalString += curGPU + " (VRAM: " + accurateVRAMStr + " GB)\n"
+            else:
+                finalString += "\t\t" + curGPU + "\n"
+
+        return finalString.rstrip("\n")
     except Exception as e:
         return str(e)
 
 
 # ---- RAM ----
-def getRAM():
+def windows_getRAM():
     try:
         # wmic memorychip get manufacturer
         ramManuList = check_output(["wmic","memorychip","get", "manufacturer"]).decode().strip().replace('\r\r', '').split("\n")[1:]
@@ -74,7 +190,7 @@ def getRAM():
 
 
 # ---- MAINBOARD ----
-def getMainboard():
+def windows_getMainboard():
     try:
         # Run the command to get the mainboard model
         manufacturer = check_output(["wmic", "baseboard", "get", "Manufacturer"]).decode().split("\n")[1].strip()
@@ -87,7 +203,7 @@ def getMainboard():
 
 
 # ---- Disks ----
-def getDisks():
+def windows_getDisks():
     # wmic diskdrive get model,size
     try:
         diskModels = check_output(["wmic", "diskdrive", "get", "model"]).decode().strip().replace('\r\r', '').split("\n")[1:]
@@ -113,11 +229,26 @@ def getDisks():
 
 
 def main():
-    print("CPU:\t\t"        + getCPU())
-    print("GPU:\t\t"        + getGPU())
-    print("Mainboard:\t"    + getMainboard())
-    print("RAM:"            + getRAM())
-    print("Disks:"          + getDisks())
+    currentOS = system().lower()
+    if currentOS == "darwin":
+        print("CPU:\t"          + darwin_getCPU())
+        print("GPU:\t"          + darwin_getGPU())
+        #print("Mainboard:\t"   + darwin_getMainboard()) # no idea if this is possible
+        print("RAM:"            + darwin_getRAM())
+        print("Disks:"          + darwin_getDisks())
+    elif currentOS == "linux":
+        print("Linux support will be added soon.. (surely)")
+        return
+    elif currentOS == "windows":
+        print("CPU:\t\t"        + windows_getCPU())
+        print("GPU:\t\t"        + windows_getGPU())
+        print("Mainboard:\t"    + windows_getMainboard())
+        print("RAM:"            + windows_getRAM())
+        print("Disks:"          + windows_getDisks())
+    else:
+        print("Unsupported OS.")
 
 
 main()
+# won't be fixed: macos cant determine mainboard model AFAIK
+# won't be fixed: windows version shows advertised storage amount, but macos version shows actual storage amount. who cares, lets not confuse the windows enjoyers
